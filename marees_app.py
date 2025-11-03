@@ -1,24 +1,87 @@
-import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import re
-from math import cos, pi
+from math import sin, cos, pi
+import io
+from PIL import Image
+import streamlit as st
 
+# -----------------------------------------------------
+# 🔧 CONFIGURATION
+# -----------------------------------------------------
 LAT, LON = 49.4938, 0.1077  # Le Havre
 
-# --- Configuration page ---
 st.set_page_config(
     page_title="🌊 Marées, Soleil, Météo & Lune - Le Havre",
-    page_icon="🌕",
+    page_icon="🌊",
     layout="wide"
 )
 
-st.title("🌊 Prévisions Marées, Soleil, Météo & Lune - Le Havre")
+st.title("🌅 Prévisions Marées, Soleil, Météo & Lune - Le Havre")
 st.caption(f"Prévisions sur 3 jours – {datetime.now().strftime('%d/%m/%Y')}")
 
 
-# --- Fonction météo ---
+# -----------------------------------------------------
+# 🧭 SCRAPER MAREE.INFO (corrigé)
+# -----------------------------------------------------
+def scrape_maree_le_havre():
+    url = "https://maree.info/19"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    resp = requests.get(url, headers=headers, timeout=10)
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    table = next((t for t in soup.find_all("table") if "Date" in t.get_text() and "Heure" in t.get_text()), None)
+    if not table:
+        return {}
+
+    results, current_date = {}, None
+    for row in table.find_all("tr"):
+        cols = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
+        if not cols:
+            continue
+        # Ignore les en-têtes
+        if "Date" in cols[0] and "Heure" in " ".join(cols):
+            continue
+
+        # Nouvelle date
+        if cols[0]:
+            current_date = cols[0].strip()
+            results[current_date] = []
+
+        # Données horaires
+        if len(cols) >= 4 and current_date:
+            heures = re.findall(r"\d{2}h\d{2}", cols[1])
+            hauteurs = re.findall(r"\d,\d+m", cols[2])
+            coeffs = re.findall(r"\d{2,3}", cols[3])
+            for i in range(max(len(heures), len(hauteurs))):
+                heure = heures[i] if i < len(heures) else "?"
+                hauteur = hauteurs[i] if i < len(hauteurs) else "?"
+                coeff = coeffs[i] if i < len(coeffs) else ""
+                type_maree = "Pleine mer" if i % 2 else "Basse mer"
+                results[current_date].append((heure, hauteur, coeff, type_maree))
+
+    # ✅ Correction : gestion du mois + limite à 3 jours
+    today = datetime.now().date()
+    final_results = {}
+    mois_noms = ["janv", "févr", "mars", "avril", "mai", "juin",
+                 "juil", "août", "sept", "oct", "nov", "déc"]
+    for d, v in results.items():
+        match = re.search(r"(\d{1,2})\s+([A-Za-zéû]+)", d)
+        if match:
+            jour = int(match.group(1))
+            mois_str = match.group(2).lower()
+            mois_num = next((i + 1 for i, m in enumerate(mois_noms) if m in mois_str), None)
+            if mois_num:
+                date_obj = datetime(today.year, mois_num, jour).date()
+                if 0 <= (date_obj - today).days <= 2:
+                    final_results[d] = v
+    return final_results
+
+
+# -----------------------------------------------------
+# 🌤️ MÉTÉO + SOLEIL + VENT
+# -----------------------------------------------------
 def get_forecasts(lat, lon):
     url = (
         f"https://api.open-meteo.com/v1/forecast?"
@@ -43,38 +106,9 @@ def get_forecasts(lat, lon):
     return res
 
 
-# --- Fonction marées ---
-def scrape_maree_le_havre():
-    url = "https://maree.info/19"
-    resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-    soup = BeautifulSoup(resp.text, "html.parser")
-    table = next((t for t in soup.find_all("table") if "Date" in t.text and "Heure" in t.text), None)
-    if not table:
-        return {}
-
-    results, current_date = {}, None
-    for row in table.find_all("tr"):
-        cols = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
-        if not cols:
-            continue
-        if cols[0]:
-            current_date = cols[0].replace(" ", "")
-            results[current_date] = []
-        if len(cols) >= 4:
-            heures = re.findall(r"\d{2}h\d{2}", cols[1])
-            hauteurs = re.findall(r"\d,\d+m", cols[2])
-            coeffs = re.findall(r"\d{2,3}", cols[3])
-            for i in range(max(len(heures), len(hauteurs))):
-                heure = heures[i] if i < len(heures) else "?"
-                hauteur = hauteurs[i] if i < len(hauteurs) else "?"
-                coeff = coeffs[i] if i < len(coeffs) else ""
-                type_maree = "Pleine mer" if i % 2 else "Basse mer"
-                results[current_date].append((heure, hauteur, coeff, type_maree))
-    today = datetime.now().day
-    return {d: v for d, v in results.items() if re.search(r"\d+", d) and 0 <= int(re.findall(r'\d+', d)[0]) - today <= 2}
-
-
-# --- Phase de la Lune ---
+# -----------------------------------------------------
+# 🌕 LUNE (calcul local + image réaliste)
+# -----------------------------------------------------
 def get_moon_data():
     def moon_phase(date):
         diff = date - datetime(2001, 1, 1)
@@ -83,37 +117,47 @@ def get_moon_data():
         return lunations % 1
 
     today = datetime.now().date()
-    data = {}
+    moon_data = {}
     for i in range(3):
         d = today + timedelta(days=i)
         phase = moon_phase(datetime.combine(d, datetime.min.time()))
         luminance = round(100 * (1 - cos(2 * pi * phase)) / 2, 1)
-        data[d.isoformat()] = (phase, luminance)
-    return data
+        moon_data[d.isoformat()] = (phase, luminance)
+    return moon_data
 
 
 def moon_phase_text(phase):
     if phase < 0.03 or phase > 0.97:
         return "🌑 Nouvelle lune"
-    elif 0.03 <= phase < 0.22:
-        return "🌒 Croissante"
-    elif 0.22 <= phase < 0.27:
+    elif 0.03 <= phase < 0.25:
+        return "🌒 Lune croissante"
+    elif 0.25 <= phase < 0.48:
         return "🌓 Premier quartier"
-    elif 0.27 <= phase < 0.47:
-        return "🌔 Gibbeuse croissante"
-    elif 0.47 <= phase < 0.53:
+    elif 0.48 <= phase < 0.52:
         return "🌕 Pleine lune"
-    elif 0.53 <= phase < 0.73:
+    elif 0.52 <= phase < 0.75:
         return "🌖 Gibbeuse décroissante"
-    elif 0.73 <= phase < 0.78:
+    elif 0.75 <= phase < 0.97:
         return "🌗 Dernier quartier"
     else:
-        return "🌘 Décroissante"
+        return "🌘 Phase inconnue"
 
 
-# --- Traduction météo ---
-def get_weather_icon(code):
-    if code in [0]: return "☀️ Ciel clair"
+def generate_moon_image(luminance):
+    """Image simple mais réaliste (texture lunaire)"""
+    img = Image.new("RGB", (100, 100), "black")
+    moon = Image.open(
+        requests.get("https://upload.wikimedia.org/wikipedia/commons/5/50/Moon.jpg", stream=True).raw
+    ).resize((100, 100))
+    img.paste(moon, (0, 0))
+    return img
+
+
+# -----------------------------------------------------
+# 🧭 UTILITAIRES
+# -----------------------------------------------------
+def get_weather_text(code):
+    if code in [0]: return "☀️ Ensoleillé"
     elif code in [1, 2, 3]: return "🌤️ Partiellement nuageux"
     elif code in [45, 48]: return "🌫️ Brouillard"
     elif code in [51, 53, 55, 56, 57]: return "🌦️ Bruine"
@@ -123,36 +167,50 @@ def get_weather_icon(code):
     else: return "❔"
 
 
-# --- Données ---
+def direction_to_cardinal(deg):
+    dirs = ["N", "NE", "E", "SE", "S", "SO", "O", "NO"]
+    return dirs[int((deg + 22.5) / 45) % 8]
+
+
+# -----------------------------------------------------
+# 🚀 AFFICHAGE STREAMLIT
+# -----------------------------------------------------
 forecast = get_forecasts(LAT, LON)
-marees = scrape_maree_le_havre()
 moon_data = get_moon_data()
+marees = scrape_maree_le_havre()
 
 cols = st.columns(3)
 for i, day in enumerate(forecast):
     with cols[i]:
         date_str = datetime.strptime(day["date"], "%Y-%m-%d").strftime("%A %d/%m")
         st.subheader(date_str)
-        st.image("https://cdn-icons-png.flaticon.com/512/869/869869.png", width=60)
-        st.write(f"**Lever du soleil :** {day['sunrise']}  \n**Coucher du soleil :** {day['sunset']}")
+
+        # Soleil
+        st.write("🌞 **Lever du soleil :**", day["sunrise"])
+        st.write("🌇 **Coucher du soleil :**", day["sunset"])
+
+        st.divider()
 
         # Lune
         phase_value, luminance = moon_data.get(day["date"], (0, 0))
-        st.markdown("---")
-        st.write(f"{moon_phase_text(phase_value)} – **{luminance:.0f}% éclairée**")
-        st.image("https://upload.wikimedia.org/wikipedia/commons/e/e1/FullMoon2010.jpg", width=90)
+        moon_text = moon_phase_text(phase_value)
+        st.write(f"🌕 **{moon_text} – {luminance:.0f}% éclairée**")
+        st.image(generate_moon_image(luminance))
+
+        st.divider()
 
         # Météo
-        st.markdown("---")
-        st.write(get_weather_icon(day["code"]))
+        weather_text = get_weather_text(day["code"])
+        st.write(weather_text)
         st.write(f"🌡️ {day['tmin']}°C – {day['tmax']}°C")
-        st.write(f"💨 {day['wind']} km/h")
+        st.write(f"💨 {day['wind']} km/h ({direction_to_cardinal(day['dir'])})")
+
+        st.divider()
 
         # Marées
-        st.markdown("---")
         maree_keys = list(marees.keys())
         if i < len(maree_keys):
             for (h, ht, cf, t) in marees[maree_keys[i]]:
-                st.write(f"• {t} à {h} → {ht} (Coeff {cf})" if cf else f"• {t} à {h} → {ht}")
+                st.write(f"{t} à {h} → {ht} (Coeff {cf})")
         else:
-            st.info("Données marées indisponibles.")
+            st.info("🌊 Données marées indisponibles.")
