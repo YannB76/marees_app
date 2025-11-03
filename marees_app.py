@@ -143,14 +143,32 @@ def moon_phase_text(phase):
         return "🌘 Phase inconnue"
 
 
+import io
+import requests
+from PIL import Image, ImageEnhance
+
 def generate_moon_image(luminance):
-    """Image simple mais réaliste (texture lunaire)"""
-    img = Image.new("RGB", (100, 100), "black")
-    moon = Image.open(
-        requests.get("https://upload.wikimedia.org/wikipedia/commons/5/50/Moon.jpg", stream=True).raw
-    ).resize((100, 100))
-    img.paste(moon, (0, 0))
-    return img
+    """Retourne une image réaliste de la lune éclairée selon le pourcentage"""
+    try:
+        # Téléchargement sécurisé de l'image de base
+        url = "https://upload.wikimedia.org/wikipedia/commons/5/56/Moon.jpg"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        img_data = io.BytesIO(response.content)
+        moon = Image.open(img_data).convert("RGB").resize((100, 100))
+
+        # Ajuster la luminosité selon l’illumination
+        enhancer = ImageEnhance.Brightness(moon)
+        brightness = 0.4 + (luminance / 100) * 0.6
+        moon_img = enhancer.enhance(brightness)
+
+        return moon_img
+    except Exception as e:
+        print(f"Erreur chargement image lune : {e}")
+        # Image de secours en cas d’erreur
+        fallback = Image.new("RGB", (100, 100), color=(30, 30, 30))
+        return fallback
+
 
 
 # -----------------------------------------------------
